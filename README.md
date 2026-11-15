@@ -223,51 +223,29 @@ BBR achieved **45.45 ± 1.12 Mbps** across five trials, **90.90%** of the 50 Mbp
 
 ### 3. Trends
 
-**How BBR works (the model).** Reno and CUBIC wait for a packet loss to tell them the network is full. BBR does not. It keeps measuring two things:
+- **No sawtooth: cwnd is almost flat:** after Startup, cwnd stays at about **190–196 packets** in all five trials. It does not climb and drop like Reno and CUBIC. BBR does not react to loss, so there is no "grow until loss, then cut" cycle. It sends at the measured link speed and keeps that steady.
 
-- **BtlBw**: the fastest delivery rate it has seen, which estimates the link speed;
-- **RTprop**: the smallest RTT it has seen, which estimates the RTT with an empty queue.
+- **ProbeBW gain cycling shows up exactly as expected:** We expected that in the 8-step cycle, gain 1.25 should take 1/8 of the time (12.5%), 0.75 another 1/8 (12.5%), and gain 1 the other 6/8 (75%). Here is what we observed:
 
-It then sends at a steady **pacing rate = gain × BtlBw** and caps cwnd at **2 × BtlBw × RTprop** (2 × BDP). BBR moves through four states:
+  | pacing_gain | Expected | Measured (5 trials) |
+  | ----------- | -------- | ------------------- |
+  | 1.25        | 12.5%    | 12.4–13.1%          |
+  | 0.75        | 12.5%    | 11.9–12.3%          |
+  | 1           | 75%      | 74.8–75.7%          |
 
-| State    | What it does                                                                 | Gain                         |
-| -------- | ---------------------------------------------------------------------------- | ---------------------------- |
-| Startup  | Doubles the sending rate every RTT to find the link speed                    | 2/ln 2 ≈ 2.89                |
-| Drain    | Sends slower for a moment to empty the queue that Startup built              | 1/2.89 ≈ 0.35                |
-| ProbeBW  | Normal running state; repeats an 8-step gain cycle                           | 1.25, 0.75, then 1 six times |
-| ProbeRTT | Every 10 s, drops cwnd to 4 packets for at least 200 ms to re-measure RTprop | —                            |
+- **ProbeRTT dips every 10 seconds:** We expected that every 10 s, cwnd drops to 4 packets for about 200 ms. We observed that very trial has exactly **5 dips** (25 in total). These are the deep, narrow drops to the bottom of each panel.
 
-For our link, BDP = 83 packets, so the model expects cwnd ≈ 2 × 83 = 166 and an RTT close to 20 ms, because BBR tries to keep the queue nearly empty.
-
-**No sawtooth: cwnd is almost flat:** after Startup, cwnd stays at about **190–196 packets** in all five trials. It does not climb and drop like Reno and CUBIC. BBR does not react to loss, so there is no "grow until loss, then cut" cycle. It sends at the measured link speed and keeps that steady.
-
-**ProbeBW gain cycling shows up exactly as expected:** We expected that in the 8-step cycle, gain 1.25 should take 1/8 of the time (12.5%), 0.75 another 1/8 (12.5%), and gain 1 the other 6/8 (75%). Here is what we observed:
-
-| pacing_gain | Expected | Measured (5 trials) |
-| ----------- | -------- | ------------------- |
-| 1.25        | 12.5%    | 12.4–13.1%          |
-| 0.75        | 12.5%    | 11.9–12.3%          |
-| 1           | 75%      | 74.8–75.7%          |
-
-**ProbeRTT dips every 10 seconds:** We expected that every 10 s, cwnd drops to 4 packets for about 200 ms. We observed that very trial has exactly **5 dips** (25 in total). These are the deep, narrow drops to the bottom of each panel.
-
-**BBR measures the link correctly and keeps the queue small:**
-
-- **BtlBw ≈ 48.2 Mbps** in every trial, not 50. The link counts full Ethernet frames (1514 bytes), but BBR counts only the TCP data in them (1448 bytes): 50 × 1448 / 1514 ≈ 47.8 Mbps, very close to 48.2.
-- **RTprop = 20.0 ms** in every trial, exactly 2 × 10 ms.
-- **The RTT stays low:** the median RTT is **23.7–26.4 ms**, so the queue holds only about 4–6 ms of data, or about 15–25 packets. Reno and CUBIC filled the whole 83-packet queue, so their RTT went up to about 40 ms. **Low delay is BBR's main advantage.**
+- **BBR measures the link correctly and keeps the queue small:**
+  - **BtlBw ≈ 48.2 Mbps** in every trial, not 50. The link counts full Ethernet frames (1514 bytes), but BBR counts only the TCP data in them (1448 bytes): 50 × 1448 / 1514 ≈ 47.8 Mbps, very close to 48.2.
+  - **RTprop = 20.0 ms** in every trial, exactly 2 × 10 ms.
+  - **The RTT stays low:** the median RTT is **23.7–26.4 ms**, so the queue holds only about 4–6 ms of data, or about 15–25 packets. Reno and CUBIC filled the whole 83-packet queue, so their RTT went up to about 40 ms. **Low delay is BBR's main advantage.**
 
 ### 4. Deviations
 
-\*_cwnd is about 194, not 2 × BDP = 166:_
+- **cwnd is about 194, not 2 × BDP = 166:** We expected cwnd = 2 × BDP = 166 packets. We observed that cwnd sits at about **192–194 packets** (median) in every trial. It may because Linux BBR adds a small allowance on top of 2 × BDP. It covers packets that are sent in small batches and ACKs that arrive in bunches, which happens a lot in a VM.
 
-- **Expected:** cwnd = 2 × BDP = 166 packets.
-- **Observed:** cwnd sits at about **192–194 packets** (median) in every trial.
-- **Reason:** Linux BBR adds a small allowance on top of 2 × BDP. It covers packets that are sent in small batches and ACKs that arrive in bunches, which happens a lot in a VM.
+- **Losses during steady state, and spikes in cwnd:** We expected that after Startup, BBR should lose almost nothing. However, some trials have many retransmissions after Startup, from 41 in trial 1 to 640 in trial 3. It may be because of the VM's pauses. When the VM stops for 100–500 ms, ACKs stop arriving and BBR's steady pacing breaks. When the VM wakes up, a burst of packets is sent at once. Here cwnd (≈194) is **larger** than what the link plus queue can hold (166), so cwnd cannot stop such a burst from overflowing the queue, and packets are lost.
 
-**Losses during steady state, and spikes in cwnd:** We expected that after Startup, BBR should lose almost nothing. However, some trials have many retransmissions after Startup, from 41 in trial 1 to 640 in trial 3. It may be because of the VM's pauses. When the VM stops for 100–500 ms, ACKs stop arriving and BBR's steady pacing breaks. When the VM wakes up, a burst of packets is sent at once. Here cwnd (≈194) is **larger** than what the link plus queue can hold (166), so cwnd cannot stop such a burst from overflowing the queue, and packets are lost.
-
-**BBR's throughput is a little lower than Reno's and CUBIC's:** We expected that BBR should use the link about as well as the others, but with a much shorter queue. However, BBR averages 45.45 Mbps, compared with 46.37 (Reno) and 46.26 (CUBIC). There are twom main reasons:
-
-1. **ProbeRTT costs time:** for about 0.21 s out of every ~10.2 s (about 2%), cwnd is only 4 packets and the link is mostly idle. That alone costs roughly 1 Mbps.
-2. **VM pauses:** the noisiest trials lose the most. Trial 3 (34 gaps) has the lowest throughput, 43.65 Mbps. The two quietest trials (1 and 2) reach 46.3 Mbps, about the same as Reno and CUBIC.
+- **BBR's throughput is a little lower than Reno's and CUBIC's:** We expected that BBR should use the link about as well as the others, but with a much shorter queue. However, BBR averages 45.45 Mbps, compared with 46.37 (Reno) and 46.26 (CUBIC). There are twom main reasons:
+  1. **ProbeRTT costs time:** for about 0.21 s out of every ~10.2 s (about 2%), cwnd is only 4 packets and the link is mostly idle. That alone costs roughly 1 Mbps.
+  2. **VM pauses:** the noisiest trials lose the most. Trial 3 (34 gaps) has the lowest throughput, 43.65 Mbps. The two quietest trials (1 and 2) reach 46.3 Mbps, about the same as Reno and CUBIC.
