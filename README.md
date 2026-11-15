@@ -1,3 +1,38 @@
+## Setup
+
+### Environment
+
+Mininet runs on Linux only. If you use macOS or Windows, use [Multipass](https://canonical.com/multipass) to run an Ubuntu VM:
+
+```bash
+multipass launch --name cc --cpus 2 --memory 4G --disk 10G   # create the VM
+multipass shell cc                                           # open a shell inside it
+multipass transfer dumbbell.py cc:                           # copy a file from your machine into the VM
+```
+
+Inside the Ubuntu VM, install the tools and load BBR:
+
+```bash
+sudo apt update
+sudo apt install mininet openvswitch-switch iperf3 ethtool
+sudo modprobe tcp_bbr                                # load the BBR kernel module (Reno and CUBIC are built in)
+sysctl net.ipv4.tcp_available_congestion_control    # must list reno cubic bbr
+```
+
+### Apple Silicon Macs only: keep the VM's CPUs awake
+
+When a VM CPU goes idle, macOS wakes it late, so netem's delays (and BBR's pacing) fire tens of milliseconds late. Before using Mininet, open a second VM shell (`multipass shell cc`), run this, and leave that shell open:
+
+```bash
+for i in $(seq $(nproc)); do chrt -i 0 sh -c 'while :; do :; done' & done   # one busy loop per VM CPU
+```
+
+`chrt -i 0` runs the loops at the lowest scheduling priority, so they only use CPU time that nothing else wants. Stop them when you are done:
+
+```bash
+pkill -f 'while :'
+```
+
 ## E1 — TCP Reno Congestion Window over a Bottleneck Link
 
 ### 1. Regenerating the Plot
@@ -72,22 +107,13 @@ Reno achieved a steady-state throughput of **46.37 ± 0.71 Mbps** across five tr
 
 1. **AIMD sawtooth between BDP and BDP + B.** After slow start, cwnd rises to 166 packets, halves to 83, and repeats. In trial 1, 17 of the 19 cycles after slow start peak at exactly 166 and fall to exactly 83, the values the drop-tail model predicts.
 
-2. **Each ramp curves (concave) instead of rising in a straight line.** A straight ramp assumes a constant RTT. Here, every packet above the BDP waits in the bottleneck queue. RTT therefore grows from 20 ms at cwnd = 83 to 40 ms at cwnd = 166, a full queue being 83 packets × 0.24 ms = 20 ms. Reno adds one packet per RTT, so in packets per second it grows half as fast at the top of a ramp as at the bottom. The iperf3 RTTs support this: mean RTT ≈ 30 ms, midway between 20 and 40 ms. In trials 1 and 2 the maximum RTT is 40.5 ms, just above the 40 ms that a full queue allows.
+2. **Each ramp curves (concave) instead of rising in a straight line.** A straight ramp assumes a constant RTT. Here, every packet above the BDP waits in the bottleneck queue. RTT therefore grows from 20 ms at cwnd = 83 to 40 ms at cwnd = 166, a full queue being 83 packets × 0.24 ms = 20 ms. Reno adds one packet per RTT, so in packets per second it grows half as fast at the top of a ramp as at the bottom.
 
-3. **The sawtooth period is about 2.6 s.** Integrating dW/dt = 1/RTT(W), with RTT(W) = RTT_min × W / BDP, from 83 to 166 gives a period of RTT_min / (2·BDP) × (166² − 83²) ≈ 2.48 s. The measured median period is 2.59 s in every trial, about 4 % longer. The model uses a nominal RTT_min of exactly 20 ms and 1500 B packets. In reality the measured minimum RTT is 20.2–20.4 ms, because host and switch processing add to the netem delay. HTB also sends 1514 B Ethernet frames, so each queued packet adds 0.242 ms instead of 0.240 ms. Both effects make every RTT on the ramp slightly longer.
-
-4. **Slow start overshoots to about 2 × (BDP + B).** In every trial, cwnd briefly spikes to 304–322 packets (313 ± 8.8), about twice 166. In slow start, cwnd doubles every RTT. The queue overflows when cwnd passes 166, but the sender learns about the loss one RTT later (about 40 ms with a full queue). By then cwnd has doubled again. That burst causes most of trial 1's 241 retransmissions. After recovery, cwnd is about 160, but the queue still holds the burst. A second loss therefore follows almost immediately and brings cwnd to 83, where the steady sawtooth begins. The throughput in section 3 skips the first 5 s to leave out this transient.
-
-5. **Throughput is close to the most the link can deliver.** iperf3 counts only TCP payload. Each 1514 B frame on the wire carries 1448 B of data, so the highest throughput iperf3 can report on a 50 Mbps link is 50 × 1448/1514 ≈ 47.8 Mbps. Reno's 46.37 ± 0.71 Mbps is therefore about 97 % of that ceiling, even though it is 92.7 % of raw capacity. Nearly all of the gap to 50 Mbps is header overhead, not idle link time. That is the behavior expected when B = BDP, because the trough of cwnd = BDP keeps the link busy.
+3. **The sawtooth period is about 2.6 s.** Integrating dW/dt = 1/RTT(W), with RTT(W) = RTT_min × W / BDP, from 83 to 166 gives a period of RTT_min / (2·BDP) × (166² − 83²) ≈ 2.48 s.
 
 #### Deviations
 
-- **Some losses come before cwnd reaches BDP + B (trial 2, trial 3, and one or two cycles each in trials 1 and 5).** These cycles peak at 100–160 packets instead of 166, and then fall to 50–75, which is below the BDP. A drop-tail queue can overflow early only if packets arrive faster than C, or drain slower than C, for a while. The model assumes a constant drain rate C and a constant propagation delay. The emulation breaks both assumptions, because HTB (rate limiting), netem (delay), iperf3, and the `ss` sampler all share one VM's CPU. When the VM or its packet-processing work is briefly descheduled:
-  - the bottleneck stops draining;
-  - netem then releases its delayed packets in a burst;
-  - the 83-packet queue overflows even though cwnd is below 166.
-
-  The iperf3 RTTs show this. Queueing alone cannot push RTT above 2 × 20 ms = 40 ms, yet the maximum RTT is 112 ms in trial 3, 225 ms in trial 4 and 57 ms in trial 5. The extra time can only come from stalls on the host. Trial 2 has no such RTT spike. iperf3 reports the kernel's smoothed RTT, which averages out stalls of only a few milliseconds, so short stalls can still cause losses without showing up in the maximum. Trials 2–5 all show more retransmissions than trial 1 (378–657 vs. 241) and lower throughput (45.7–46.3 vs. 47.6 Mbps).
+- **Some losses happened earlier than expected..** In some cycles, cwnd reached only 100–160 packets instead of the predicted 166 before dropping. One possible reason is that the VM does not process packets at a perfectly steady rate. Brief scheduling delays can cause packets to arrive in bursts and fill the queue early.
 
 - **Troughs below 83 packets are still Reno's normal halving.** Each deep trough is half of the lower peak before it, for example 113 → 56 and 110 → 55. Reno itself is behaving correctly; only the point where loss happens has moved. While cwnd is below the BDP, the queue is empty and the link is briefly idle, which is why the trials with these cycles have lower throughput.
 
