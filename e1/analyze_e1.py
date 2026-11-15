@@ -81,10 +81,12 @@ def main():
     bdp = a.bw * 1e6 * (2 * a.delay_ms / 1000) / (MTU * 8)
     peak = bdp + max(1, int(a.buf * bdp))
 
-    logs = sorted(DATA.glob(f"e1_b1_{a.algo}_t*_ss.txt"),
+    # Logs live in data/e1/<algo>/ (older layout: directly in data/e1/)
+    data_dir = DATA / a.algo if (DATA / a.algo).is_dir() else DATA
+    logs = sorted(data_dir.glob(f"e1_b1_{a.algo}_t*_ss.txt"),
                   key=lambda p: int(re.search(r"_t(\d+)_", p.name).group(1)))
     if not logs:
-        sys.exit(f"no {a.algo} logs in {DATA}")
+        sys.exit(f"no {a.algo} logs in {data_dir}")
     traces = [(int(re.search(r"_t(\d+)_", p.name).group(1)), *load_trace(p))
               for p in logs]
 
