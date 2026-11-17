@@ -33,6 +33,29 @@ for i in $(seq $(nproc)); do chrt -i 0 sh -c 'while :; do :; done' & done   # on
 pkill -f 'while :'
 ```
 
+### Experiment
+
+### 1. Start the network
+
+```bash
+sudo python3 dumbbell.py --bw 50 --delay 10ms --buf 1
+```
+
+- To change --bw, --delay, --delay1, --buf, or --loss, type exit and start the script again with the new options.
+- If the script crashes, clean up before restarting:
+  ```bash
+  sudo mn -c
+  sudo pkill iperf3
+  ```
+
+### 2. One trial = two commands
+
+Every single-flow trial is the same two commands typed at the mininet> prompt.
+
+- Example: Reno, trial 1 of E1:
+  - mininet> snd0 timeout 65 sh -c 'while :; do date +%s.%N; ss -tin dst 10.0.0.101:5201; sleep 0.01; done' > e1_b1_reno_t1_ss.txt &
+  - mininet> snd0 iperf3 -c 10.0.0.101 -C reno -t 60 -i 0.5 -J --logfile e1_b1_reno_t1.json
+
 ## E1 — Single flow, cwnd(t)
 
 ### A. Reno
@@ -237,7 +260,7 @@ BBR achieved **45.45 ± 1.12 Mbps** across five trials, **90.90%** of the 50 Mbp
 
 - **BBR measures the link correctly and keeps the queue small:**
   - **BtlBw ≈ 48.2 Mbps** in every trial, not 50. The link counts full Ethernet frames (1514 bytes), but BBR counts only the TCP data in them (1448 bytes): 50 × 1448 / 1514 ≈ 47.8 Mbps, very close to 48.2.
-  - **RTprop = 20.0 ms** in every trial, exactly 2 × 10 ms.
+  - **RTprop = 20.0 ms** in every trial, exactly 2 × 10 ms (receiving and sending).
   - **The RTT stays low:** the median RTT is **23.7–26.4 ms**, so the queue holds only about 4–6 ms of data, or about 15–25 packets. Reno and CUBIC filled the whole 83-packet queue, so their RTT went up to about 40 ms. **Low delay is BBR's main advantage.**
 
 ### 4. Deviations
@@ -249,3 +272,301 @@ BBR achieved **45.45 ± 1.12 Mbps** across five trials, **90.90%** of the 50 Mbp
 - **BBR's throughput is a little lower than Reno's and CUBIC's:** We expected that BBR should use the link about as well as the others, but with a much shorter queue. However, BBR averages 45.45 Mbps, compared with 46.37 (Reno) and 46.26 (CUBIC). There are twom main reasons:
   1. **ProbeRTT costs time:** for about 0.21 s out of every ~10.2 s (about 2%), cwnd is only 4 packets and the link is mostly idle. That alone costs roughly 1 Mbps.
   2. **VM pauses:** the noisiest trials lose the most. Trial 3 (34 gaps) has the lowest throughput, 43.65 Mbps. The two quietest trials (1 and 2) reach 46.3 Mbps, about the same as Reno and CUBIC.
+
+## E2 — Vary B / BDP
+
+E2 repeats E1's single-flow trials with three buffer sizes, `--buf 0.1`, `--buf 1` and `--buf 4`, for each algorithm. For each one it measures the **queueing delay** and the **link utilization U**, to show the trade-off between the two.
+
+**What we expect** (C = 50 Mbps, RTT_min = 20 ms, BDP = 83 packets):
+
+| `--buf` | B (packets) | Predicted peak delay B / C = buf × RTT_min |
+| ------- | ----------- | ------------------------------------------ |
+| 0.1     | 8           | about 2 ms                                 |
+| 1       | 83          | about 20 ms                                |
+| 4       | 333         | about 80 ms                                |
+
+- **Reno and CUBIC** (loss-based) keep growing cwnd until the buffer overflows, so their delay climbs toward B / C again and again (_bufferbloat_). With `--buf 0.1` they should fall short of U ≈ 100%, because after each loss cwnd drops below the BDP and the link sits partly idle.
+- **BBR** should keep the queue near 0 for every buffer size.
+
+**Measuring queueing delay.** Queueing delay = `rtt` from each `ss` sample − RTT_min, using the samples from 5 s to 60 s of the flow. RTT_min = 20.00 ms, the smallest `minrtt` reported by ss (the RTT with an empty queue). We report the **mean** and the **95th percentile (p95)**. The p95 is close to the peak, which is what B / C predicts.
+
+### A. Reno
+
+### 1. Running the Plots
+
+```bash
+python3 e2/analyze_e2.py --algo <algo> --buf <number>
+
+python3 e2/analyze_e2.py --algo reno --buf 0.1
+```
+
+In the cwnd plots, the dashed line marks BDP + B (where the queue overflows) and the dotted line marks BDP = 83 packets.
+
+**`--buf 0.1`** (B = 8 packets, BDP + B = 91, B / C = 1.9 ms)
+
+![Reno cwnd, buf 0.1](plots/e2/e2_reno_buf0.1_cwnd.png)
+
+**`--buf 1`** (B = 83 packets, BDP + B = 166, B / C = 19.9 ms)
+
+![Reno cwnd, buf 1](plots/e2/e2_reno_buf1_cwnd.png)
+
+**`--buf 4`** (B = 333 packets, BDP + B = 416, B / C = 79.9 ms)
+
+![Reno cwnd, buf 4](plots/e2/e2_reno_buf4_cwnd.png)
+
+### 2. Throughput and Queueing Delay
+
+The same commands also print, for each trial, the throughput (iperf3 intervals starting at 5 s or later, same as E1), U = x / C, and the queueing delay.
+
+`--buf 0.1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      24.61 Mbps  49.2%    0.50 ms    1.18 ms       286
+t2      22.67 Mbps  45.3%    0.61 ms    1.35 ms       487
+t3      22.88 Mbps  45.8%    0.55 ms    1.27 ms       241
+t4      21.25 Mbps  42.5%    0.75 ms    1.49 ms       432
+t5      25.03 Mbps  50.1%    0.50 ms    1.22 ms       213
+
+Mean ± SD throughput: 23.29 ± 1.54 Mbps, U = 46.58%
+Mean queueing delay: 0.58 ms, p95: 1.30 ms (predicted peak 1.92 ms)
+```
+
+`--buf 1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      47.85 Mbps  95.7%   11.01 ms   19.27 ms       209
+t2      47.70 Mbps  95.4%   10.86 ms   19.21 ms       265
+t3      45.56 Mbps  91.1%   10.93 ms   19.21 ms       276
+t4      47.62 Mbps  95.2%   10.76 ms   19.19 ms       216
+t5      47.13 Mbps  94.3%   10.85 ms   19.18 ms       222
+
+Mean ± SD throughput: 47.17 ± 0.94 Mbps, U = 94.35%
+Mean queueing delay: 10.88 ms, p95: 19.21 ms (predicted peak 19.92 ms)
+```
+
+`--buf 4`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      46.66 Mbps  93.3%   58.17 ms   78.03 ms       456
+t2      47.05 Mbps  94.1%   55.30 ms   77.67 ms       431
+t3      42.80 Mbps  85.6%   60.34 ms   79.77 ms       444
+t4      46.75 Mbps  93.5%   52.21 ms   73.41 ms       548
+t5      47.00 Mbps  94.0%   54.13 ms   75.46 ms       468
+
+Mean ± SD throughput: 46.05 ± 1.83 Mbps, U = 92.10%
+Mean queueing delay: 56.03 ms, p95: 76.87 ms (predicted peak 79.92 ms)
+```
+
+**Summary: the trade-off.**
+
+| `--buf` | Predicted peak B / C | Mean queueing delay | p95 queueing delay | Throughput        | U         |
+| ------- | -------------------- | ------------------- | ------------------ | ----------------- | --------- |
+| 0.1     | 1.9 ms               | 0.58 ms             | 1.30 ms            | 23.29 ± 1.54 Mbps | **46.6%** |
+| 1       | 19.9 ms              | 10.88 ms            | 19.21 ms           | 47.17 ± 0.94 Mbps | **94.4%** |
+| 4       | 79.9 ms              | 56.03 ms            | 76.87 ms           | 46.05 ± 1.83 Mbps | **92.1%** |
+
+- **From 0.1 to 1:** a buffer 10× larger made the queueing delay about 19× larger, but doubled the throughput. This is a good trade.
+- **From 1 to 4:** a buffer 4× larger made the queueing delay about 5× larger, but gave **no** extra throughput.
+
+### 3. Trends
+
+- **Delay matches the prediction:**
+
+- **With `--buf 0.1`, the link is half empty:** cwnd stays below the BDP (83) almost the whole time, averaging about 42 packets. Since 42 / 83 ≈ 50%, that matches the measured U of 46.6%.
+
+- **With `--buf 4`, the queue never empties:** After a loss, cwnd only drops to 416 / 2 = 208, which is still more than the BDP. So the delay never goes below about 22 ms. Each cycle is also much slower, about 16 s (the model predicts 15.6 s), so there are only 3–4 losses per run.
+
+### 4. Deviations
+
+- **U does not match the model:** At `--buf 0.1` we expected about 81% but got 46.6%, because Reno sends bursts and just 9 packets overflow the 8-packet buffer, so cwnd drops at about 52 instead of 91. At `--buf 4` we got 92.1%, a bit below `--buf 1` (94.4%), but only because trial 3 was slow; without it both are about 94%, near the 95.6% maximum.
+
+### B. CUBIC
+
+### 1. Running the Plots
+
+In the cwnd plots, the dashed line marks BDP + B (where the queue overflows) and the dotted line marks BDP = 83 packets.
+
+**`--buf 0.1`** (B = 8 packets, BDP + B = 91, B / C = 1.9 ms)
+
+![CUBIC cwnd, buf 0.1](plots/e2/e2_cubic_buf0.1_cwnd.png)
+
+**`--buf 1`** (B = 83 packets, BDP + B = 166, B / C = 19.9 ms)
+
+![CUBIC cwnd, buf 1](plots/e2/e2_cubic_buf1_cwnd.png)
+
+**`--buf 4`** (B = 333 packets, BDP + B = 416, B / C = 79.9 ms)
+
+![CUBIC cwnd, buf 4](plots/e2/e2_cubic_buf4_cwnd.png)
+
+### 2. Throughput and Queueing Delay
+
+`--buf 0.1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      17.87 Mbps  35.7%    0.78 ms    1.48 ms       486
+t2      18.78 Mbps  37.6%    0.65 ms    1.32 ms       404
+t3      17.71 Mbps  35.4%    0.76 ms    1.49 ms       587
+t4      16.32 Mbps  32.6%    0.90 ms    1.97 ms       537
+t5      16.38 Mbps  32.8%    0.85 ms    1.75 ms       601
+
+Mean ± SD throughput: 17.41 ± 1.05 Mbps, U = 34.82%
+Mean queueing delay: 0.79 ms, p95: 1.60 ms (predicted peak 1.92 ms)
+```
+
+`--buf 1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      45.81 Mbps  91.6%   12.73 ms   19.34 ms       416
+t2      45.41 Mbps  90.8%   12.14 ms   19.20 ms       444
+t3      47.78 Mbps  95.6%   14.77 ms   19.43 ms       111
+t4      46.75 Mbps  93.5%   13.95 ms   19.40 ms       225
+t5      47.47 Mbps  94.9%   15.08 ms   19.47 ms        82
+
+Mean ± SD throughput: 46.64 ± 1.02 Mbps, U = 93.29%
+Mean queueing delay: 13.73 ms, p95: 19.37 ms (predicted peak 19.92 ms)
+```
+
+`--buf 4`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      46.34 Mbps  92.7%   67.21 ms   78.99 ms       246
+t2      44.22 Mbps  88.4%   61.33 ms   80.39 ms       138
+t3      41.90 Mbps  83.8%   67.73 ms   80.96 ms       124
+t4      45.36 Mbps  90.7%   66.48 ms   78.78 ms       246
+t5      47.87 Mbps  95.7%   66.11 ms   79.23 ms        47
+
+Mean ± SD throughput: 45.14 ± 2.25 Mbps, U = 90.27%
+Mean queueing delay: 65.77 ms, p95: 79.67 ms (predicted peak 79.92 ms)
+```
+
+**Summary: the trade-off.**
+
+| `--buf` | Predicted peak B / C | Mean queueing delay | p95 queueing delay | Throughput        | U         |
+| ------- | -------------------- | ------------------- | ------------------ | ----------------- | --------- |
+| 0.1     | 1.9 ms               | 0.79 ms             | 1.60 ms            | 17.41 ± 1.05 Mbps | **34.8%** |
+| 1       | 19.9 ms              | 13.73 ms            | 19.37 ms           | 46.64 ± 1.02 Mbps | **93.3%** |
+| 4       | 79.9 ms              | 65.77 ms            | 79.67 ms           | 45.14 ± 2.25 Mbps | **90.3%** |
+
+- **From 0.1 to 1:** the delay went up about 17×, and the throughput went up about 2.7×. CUBIC needs a big enough buffer even more than Reno does.
+- **From 1 to 4:** the delay went up about 5×, with **no** extra throughput. Same as Reno: the extra buffer only adds delay.
+
+### 3. Trends
+
+- **Delay matches the prediction:** the p95 delay is close to B / C for all three buffers (1.6, 19.4 and 79.7 ms). Like Reno, CUBIC fills the queue whatever its size.
+
+- **CUBIC keeps the queue fuller than Reno:** the mean delay is 13.7 ms at `--buf 1` (Reno: 10.9) and 65.8 ms at `--buf 4` (Reno: 56.0). CUBIC only cuts cwnd to 70% after a loss (Reno cuts to 50%), and its curve stays flat near the top for a long time, so the queue rarely drains.
+
+- **Every loss cuts cwnd to about 70%:** the median trough ÷ peak is **0.70** at `--buf 1` and `--buf 4`, and 0.68 at `--buf 0.1`.
+
+- **`--buf 4` shows the whole cubic curve:** this is the only buffer size where the plateau and the convex "probing" part both appear. The cycles alternate:
+  - a **short cycle** (about 4.6–4.9 s): after a loss at 416, cwnd drops to 291 and climbs back toward 416, then loses again at about 412–417;
+  - a **long cycle** (about 11 s): that second loss is just below the previous peak, so Linux lowers its target to 0.85 × 414 ≈ 350 (_fast convergence_). cwnd rises to 350, stays flat for several seconds, then speeds up again (the convex part) until it hits 416.
+
+  Trial 5 shows this most clearly. The model predicts the long cycle takes about 10.8 s; we measured 11.0–11.2 s.
+
+- **With `--buf 0.1`, CUBIC grows at half Reno's speed:** RTT is only about 20 ms here, so CUBIC uses its Reno-friendly window, which grows by about 0.53 packets per RTT. We measured **25 packets/s**, close to 0.53 / 20.6 ms ≈ 26, and about half of Reno's 48.5 packets/s.
+
+### 4. Deviations
+
+- **U at `--buf 0.1` is even lower than Reno's:** we got 34.8% (Reno: 46.6%). Just like Reno, bursts overflow the 8-packet buffer early: cwnd never reaches 91 and usually drops at about 38 packets. CUBIC also grows back half as fast as Reno, so its average cwnd is only about 32 packets. 32 / 83 ≈ 39%, close to the measured U.
+
+- **Noisy trials have lower U:** at `--buf 4`, trial 5 had no sampler gaps and reached 95.7%, while trial 3 had 51 gaps and only 83.8%. At `--buf 1`, the two quietest trials (3 and 5) reached about 95%, while the two noisiest (1 and 2) had about 4× more retransmissions and about 91%. As in E1, VM pauses most likely cause early losses.
+
+- **Many losses at `--buf 4` happen well before 416:** in trials 2 and 3 several peaks are only 350–370. Each early loss lowers the target again (fast convergence), so cwnd plateaus lower (about 300 instead of 350). Even so, cwnd never gets close to the BDP, so the link stays full.
+
+### C. BBR
+
+### 1. Running the Plots
+
+In the cwnd plots, the dashed line marks BDP + B (where the queue overflows) and the dotted line marks BDP = 83 packets.
+
+**`--buf 0.1`** (B = 8 packets, BDP + B = 91, B / C = 1.9 ms)
+
+![BBR cwnd, buf 0.1](plots/e2/e2_bbr_buf0.1_cwnd.png)
+
+**`--buf 1`** (B = 83 packets, BDP + B = 166, B / C = 19.9 ms)
+
+![BBR cwnd, buf 1](plots/e2/e2_bbr_buf1_cwnd.png)
+
+**`--buf 4`** (B = 333 packets, BDP + B = 416, B / C = 79.9 ms)
+
+![BBR cwnd, buf 4](plots/e2/e2_bbr_buf4_cwnd.png)
+
+### 2. Throughput and Queueing Delay
+
+`--buf 0.1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      46.42 Mbps  92.8%    0.71 ms    1.98 ms      9174
+t2      46.46 Mbps  92.9%    0.68 ms    1.98 ms      9075
+t3      45.32 Mbps  90.6%    0.88 ms    2.00 ms      9394
+t4      46.48 Mbps  93.0%    0.68 ms    1.98 ms      9068
+t5      46.35 Mbps  92.7%    0.69 ms    1.97 ms      9131
+
+Mean ± SD throughput: 46.21 ± 0.50 Mbps, U = 92.41%
+Mean queueing delay: 0.73 ms, p95: 1.98 ms (predicted peak 1.92 ms)
+```
+
+`--buf 1`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      45.77 Mbps  91.5%    5.52 ms   12.36 ms       347
+t2      46.18 Mbps  92.4%    6.15 ms   15.11 ms       541
+t3      45.39 Mbps  90.8%    6.31 ms   14.93 ms       752
+t4      46.80 Mbps  93.6%    4.06 ms    7.74 ms       217
+t5      44.41 Mbps  88.8%    6.13 ms   14.83 ms       545
+
+Mean ± SD throughput: 45.71 ± 0.89 Mbps, U = 91.42%
+Mean queueing delay: 5.63 ms, p95: 12.99 ms (predicted peak 19.92 ms)
+```
+
+`--buf 4`:
+
+```text
+trial  throughput     U   mean delay  p95 delay  retransmits
+t1      44.93 Mbps  89.9%    8.14 ms   20.77 ms         8
+t2      46.14 Mbps  92.3%    6.91 ms   19.66 ms         0
+t3      46.82 Mbps  93.6%    3.97 ms    7.67 ms         0
+t4      42.77 Mbps  85.5%    5.16 ms    8.20 ms         3
+t5      46.63 Mbps  93.3%    4.77 ms   10.69 ms         0
+
+Mean ± SD throughput: 45.46 ± 1.67 Mbps, U = 90.92%
+Mean queueing delay: 5.79 ms, p95: 13.40 ms (predicted peak 79.92 ms)
+```
+
+**Summary: the trade-off.**
+
+| `--buf` | Predicted peak B / C | Mean queueing delay | p95 queueing delay | Throughput        | U         | Retransmits per run |
+| ------- | -------------------- | ------------------- | ------------------ | ----------------- | --------- | ------------------- |
+| 0.1     | 1.9 ms               | 0.73 ms             | 1.98 ms            | 46.21 ± 0.50 Mbps | **92.4%** | about 9,000         |
+| 1       | 19.9 ms              | 5.63 ms             | 12.99 ms           | 45.71 ± 0.89 Mbps | **91.4%** | 217–752             |
+| 4       | 79.9 ms              | 5.79 ms             | 13.40 ms           | 45.46 ± 1.67 Mbps | **90.9%** | 0–8                 |
+
+- **BBR has no real trade-off:** U stays at about 91–92% for every buffer size, and the mean delay stays under 6 ms even when the buffer could hold 80 ms.
+- **The cost is loss at `--buf 0.1`:** about 9,000 retransmissions per run, roughly 4% of the packets sent.
+
+### 3. Trends
+
+- **BBR keeps the queue small, as predicted:** at `--buf 1` and `--buf 4` the mean delay is about the same (5.6 and 5.8 ms), even though B / C goes from 20 ms to 80 ms. Reno and CUBIC filled whatever buffer they had (56 and 66 ms at `--buf 4`). BBR sends at the measured link rate and keeps only about 97–105 packets in flight (BDP + 15–20), so it never uses the extra buffer.
+
+- **cwnd looks the same for every buffer:** about 190–194 packets, with a ProbeRTT dip to 4 packets every **10.2–10.5 s** (5 dips per run). BBR sets cwnd from its estimates (2 × BDP plus a small allowance), not from the buffer size.
+
+- **U does not depend on the buffer:** BBR does not cut its rate after a loss, so a small buffer does not leave the link idle. At `--buf 0.1` BBR gets 92.4%, against 46.6% for Reno and 34.8% for CUBIC.
+
+### 4. Deviations
+
+- **At `--buf 0.1`, BBR loses packets every gain cycle:** we expected BBR to keep the queue near empty and avoid loss. But the 1.25 probe phase sends 25% faster for one RTT, which adds about 0.25 × 83 ≈ 20 extra packets, more than the 8-packet buffer can hold. So every 8-phase gain cycle (about 8 × 20.6 ms = 165 ms) ends with a burst of losses: the plot shows cwnd dropping from about 190 to about 95 **6.1 times per second**, exactly once per cycle. BBR ignores these losses and keeps sending at the link rate, so U stays high, but this would be unfair to Reno or CUBIC flows sharing the link.
+
+- **The gain-cycle shares change at `--buf 0.1`:** at `--buf 1` and `--buf 4` the 1.25 and 0.75 phases each take about 12.5% of the time, as expected. At `--buf 0.1` the 1.25 phase takes about 17% and the 0.75 phase only about 7%. After the losses, the number of packets in flight is already at or below the BDP, so the 0.75 "drain" phase has nothing to drain and ends early.
+
+- **Startup overshoots less at `--buf 0.1`:** cwnd peaks at 196–200 instead of about 274, because the small buffer causes losses earlier in Startup.
+
+- **Noisy trials have lower U:** trial 4 of `--buf 4` (85.5%) and trial 5 of `--buf 1` (88.8%) had VM freezes of about 1.3–1.5 s, where iperf3 measured 0 Mbps for over a second. In trial 4 of `--buf 4`, that freeze also delayed one ProbeRTT dip (12.0 s apart instead of 10.2 s).
